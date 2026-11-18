@@ -95,7 +95,7 @@ class MainActivity : Activity() {
             setHintTextColor(muted)
             setTextColor(textPrimary)
             textSize = 15f
-            singleLine = true
+            setSingleLine(true)
             setPadding(dp(12), 0, dp(12), 0)
             setBackgroundColor(panel)
             addTextChangedListener(object : TextWatcher {
