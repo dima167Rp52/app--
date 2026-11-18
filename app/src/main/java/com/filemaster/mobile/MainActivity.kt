@@ -2,34 +2,49 @@ package com.filemaster.mobile
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
+import android.text.Editable
+import android.text.TextWatcher
+import android.text.SpannableString
+import android.text.style.ForegroundColorSpan
 import android.view.Gravity
-import android.view.View
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.app.AlertDialog
 import androidx.documentfile.provider.DocumentFile
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.util.zip.ZipInputStream
 
 class MainActivity : Activity() {
     private lateinit var rootLayout: LinearLayout
     private lateinit var header: TextView
     private lateinit var pathLabel: TextView
+    private lateinit var searchBox: EditText
     private lateinit var listArea: LinearLayout
     private lateinit var scroll: ScrollView
 
     private var rootFolder: DocumentFile? = null
     private var currentFolder: DocumentFile? = null
     private val folderStack = mutableListOf<DocumentFile>()
-    private var showingCode = false
+    private var showingViewer = false
+    private var transferFile: DocumentFile? = null
+    private var transferMove = false
+    private var allEntries: List<DocumentFile> = emptyList()
 
-    private val bg = 0xFF0B111B.toInt()
-    private val panel = 0xFF111B29.toInt()
-    private val accent = 0xFF263F5B.toInt()
-    private val textPrimary = 0xFFE3ECF7.toInt()
+    private val bg = 0xFF0A101A.toInt()
+    private val panel = 0xFF121E2D.toInt()
+    private val accent = 0xFF2864A5.toInt()
+    private val textPrimary = 0xFFE8F0FA.toInt()
     private val muted = 0xFF91A6BE.toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -45,12 +60,8 @@ class MainActivity : Activity() {
                 rootFolder = DocumentFile.fromTreeUri(this, uri)
                 currentFolder = rootFolder
                 renderFolder()
-            } catch (_: Exception) {
-                chooseFolder()
-            }
-        } else {
-            chooseFolder()
-        }
+            } catch (_: Exception) { chooseFolder() }
+        } else chooseFolder()
     }
 
     private fun buildScreen() {
@@ -59,55 +70,67 @@ class MainActivity : Activity() {
             setBackgroundColor(bg)
             setPadding(dp(16), dp(14), dp(16), dp(10))
         }
-
         header = TextView(this).apply {
             text = "FileMaster"
-            textSize = 27f
+            textSize = 28f
             setTextColor(textPrimary)
             typeface = Typeface.DEFAULT_BOLD
         }
         rootLayout.addView(header)
-
         pathLabel = TextView(this).apply {
-            text = "Выберите папку"
+            text = "Твой файловый центр"
             textSize = 13f
             setTextColor(muted)
-            setPadding(0, dp(7), 0, dp(12))
+            setPadding(0, dp(5), 0, dp(12))
         }
         rootLayout.addView(pathLabel)
 
-        val actions = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        actions.addView(makeButton("Выбрать папку") { chooseFolder() }, LinearLayout.LayoutParams(0, dp(46), 1f))
-        actions.addView(makeButton("← Назад") { goBack() }, LinearLayout.LayoutParams(0, dp(46), 1f).apply {
-            marginStart = dp(8)
-        })
-        rootLayout.addView(actions)
+        val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        top.addView(makeButton("Папка") { chooseFolder() }, weighted())
+        top.addView(makeButton("＋ Создать") { createFolder() }, weighted(dp(6)))
+        top.addView(makeButton("Назад") { goBack() }, weighted(dp(6)))
+        rootLayout.addView(top)
 
-        scroll = ScrollView(this).apply {
-            isFillViewport = true
-            setPadding(0, dp(12), 0, 0)
+        searchBox = EditText(this).apply {
+            hint = "Поиск в этой папке…"
+            setHintTextColor(muted)
+            setTextColor(textPrimary)
+            textSize = 15f
+            singleLine = true
+            setPadding(dp(12), 0, dp(12), 0)
+            setBackgroundColor(panel)
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { renderEntries() }
+                override fun afterTextChanged(s: Editable?) {}
+            })
         }
-        listArea = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
+        val searchParams = LinearLayout.LayoutParams(-1, dp(48))
+        searchParams.topMargin = dp(10)
+        rootLayout.addView(searchBox, searchParams)
+
+        scroll = ScrollView(this).apply { isFillViewport = true }
+        listArea = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         scroll.addView(listArea)
-        rootLayout.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
+        val scrollParams = LinearLayout.LayoutParams(-1, 0, 1f)
+        scrollParams.topMargin = dp(10)
+        rootLayout.addView(scroll, scrollParams)
         setContentView(rootLayout)
     }
 
-    private fun makeButton(label: String, action: () -> Unit): Button {
-        return Button(this).apply {
+    private fun weighted(margin: Int = 0) = LinearLayout.LayoutParams(0, dp(44), 1f).apply {
+        if (margin > 0) marginStart = margin
+    }
+
+    private fun makeButton(label: String, action: () -> Unit): Button =
+        Button(this).apply {
             text = label
             isAllCaps = false
-            textSize = 14f
+            textSize = 12f
             setTextColor(textPrimary)
             setBackgroundColor(accent)
             setOnClickListener { action() }
         }
-    }
 
     private fun chooseFolder() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
@@ -118,116 +141,183 @@ class MainActivity : Activity() {
         startActivityForResult(intent, REQUEST_FOLDER)
     }
 
-    @Deprecated("Deprecated in Android, kept for broad device compatibility")
+    @Deprecated("Deprecated in Android, kept for compatibility")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_FOLDER && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
-            val flags = (data.flags and
-                (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION))
-            try {
-                contentResolver.takePersistableUriPermission(uri, flags)
-            } catch (_: Exception) { }
+            val flags = data.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            try { contentResolver.takePersistableUriPermission(uri, flags) } catch (_: Exception) {}
             getPreferences(MODE_PRIVATE).edit().putString("tree_uri", uri.toString()).apply()
-            val folder = DocumentFile.fromTreeUri(this, uri)
-            if (folder == null) {
-                toast("Не удалось открыть папку")
-                return
-            }
+            val folder = DocumentFile.fromTreeUri(this, uri) ?: return toast("Не удалось открыть папку")
             rootFolder = folder
             currentFolder = folder
             folderStack.clear()
-            showingCode = false
+            transferFile = null
             renderFolder()
         }
     }
 
     private fun renderFolder() {
-        val folder = currentFolder ?: return
-        showingCode = false
+        showingViewer = false
+        searchBox.visibility = android.view.View.VISIBLE
         header.text = "FileMaster"
-        pathLabel.text = folder.name ?: "Выбранная папка"
-        listArea.removeAllViews()
-
-        val entries = try {
-            folder.listFiles().sortedWith(
-                compareBy<DocumentFile> { !it.isDirectory }.thenBy { it.name?.lowercase() ?: "" }
-            )
+        pathLabel.text = currentFolder?.name ?: "Выбери папку"
+        searchBox.setText("")
+        val folder = currentFolder ?: return
+        allEntries = try {
+            folder.listFiles().sortedWith(compareBy<DocumentFile> { !it.isDirectory }.thenBy { it.name?.lowercase() ?: "" })
         } catch (_: Exception) {
-            toast("Не удалось прочитать содержимое папки")
+            toast("Не удалось прочитать папку")
             emptyList()
         }
+        renderEntries()
+    }
 
-        if (entries.isEmpty()) {
-            listArea.addView(TextView(this).apply {
-                text = "Папка пустая"
-                setTextColor(muted)
-                textSize = 15f
-                setPadding(dp(8), dp(22), dp(8), dp(22))
-            })
+    private fun renderEntries() {
+        if (showingViewer) return
+        listArea.removeAllViews()
+        val query = searchBox.text?.toString()?.trim()?.lowercase().orEmpty()
+        val entries = allEntries.filter { query.isEmpty() || (it.name ?: "").lowercase().contains(query) }
+        if (transferFile != null) {
+            val mode = if (transferMove) "Переместить сюда" else "Вставить копию сюда"
+            listArea.addView(makeButton("📥 $mode: ${transferFile?.name ?: "файл"}") { pasteTransfer() })
         }
-
+        if (entries.isEmpty()) {
+            listArea.addView(label(if (query.isEmpty()) "Здесь пока пусто" else "Ничего не найдено", muted, 16f))
+        }
         entries.forEach { file ->
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setBackgroundColor(panel)
                 setPadding(dp(14), dp(12), dp(14), dp(12))
             }
-            val name = TextView(this).apply {
-                text = (if (file.isDirectory) "📁  " else "📄  ") + (file.name ?: "Без имени")
-                textSize = 16f
-                setTextColor(textPrimary)
-            }
-            row.addView(name)
-            val details = TextView(this).apply {
-                text = if (file.isDirectory) "Папка" else formatSize(file.length())
-                textSize = 12f
-                setTextColor(muted)
-                setPadding(0, dp(4), 0, 0)
-            }
-            row.addView(details)
+            row.addView(label((if (file.isDirectory) "📁  " else iconFor(file.name) + "  ") + (file.name ?: "Без имени"), textPrimary, 15f))
+            row.addView(label(if (file.isDirectory) "Папка" else formatSize(file.length()) + "  •  " + (file.type ?: "Файл"), muted, 11f))
             row.setOnClickListener {
                 if (file.isDirectory) {
-                    folderStack.add(folder)
+                    currentFolder?.let { folderStack.add(it) }
                     currentFolder = file
                     renderFolder()
-                } else {
-                    openTextFile(file)
-                }
+                } else openFile(file)
             }
-            val params = LinearLayout.LayoutParams(-1, -2)
-            params.bottomMargin = dp(7)
-            listArea.addView(row, params)
+            row.setOnLongClickListener { showFileActions(file); true }
+            val p = LinearLayout.LayoutParams(-1, -2)
+            p.bottomMargin = dp(7)
+            listArea.addView(row, p)
         }
     }
 
-    private fun openTextFile(file: DocumentFile) {
-        try {
-            if (file.length() > MAX_FILE_SIZE) {
-                toast("Файл больше 2 МБ — предпросмотр отключён")
-                return
-            }
-            val bytes = contentResolver.openInputStream(file.uri)?.use { it.readBytes() }
-                ?: throw IllegalStateException("Не удалось прочитать файл")
-            if (bytes.take(8192).any { it == 0.toByte() }) {
-                toast("Это похоже на бинарный файл")
-                return
-            }
-            val source = bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF")
-            showCode(file.name ?: "Файл", source)
-        } catch (e: Exception) {
-            toast("Не удалось открыть файл: ${e.localizedMessage ?: "ошибка чтения"}")
+    private fun iconFor(name: String?): String = when (name?.substringAfterLast('.', "")?.lowercase()) {
+        "html", "htm" -> "🌐"
+        "apk" -> "📦"
+        "zip", "jar" -> "🗜️"
+        "png", "jpg", "jpeg", "webp", "gif" -> "🖼️"
+        "mp3", "wav", "ogg" -> "🎵"
+        "mp4", "mkv" -> "🎬"
+        else -> "📄"
+    }
+
+    private fun openFile(file: DocumentFile) {
+        val ext = file.name?.substringAfterLast('.', "")?.lowercase().orEmpty()
+        when (ext) {
+            "html", "htm" -> showHtmlChoice(file)
+            "zip", "apk", "jar" -> showArchive(file)
+            "png", "jpg", "jpeg", "webp", "gif" -> openWithExternalApp(file)
+            else -> showText(file)
         }
     }
 
-    private fun showCode(fileName: String, source: String) {
-        showingCode = true
-        header.text = fileName
-        pathLabel.text = "Просмотр исходного кода"
+    private fun showHtmlChoice(file: DocumentFile) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle(file.name ?: "HTML")
+            .setItems(arrayOf("Посмотреть код", "Открыть страницу")) { _, which ->
+                if (which == 0) showText(file) else previewHtml(file)
+            }.show()
+    }
+
+    private fun readText(file: DocumentFile): String? {
+        if (file.length() > MAX_TEXT_SIZE) {
+            toast("Файл больше 5 МБ — просмотр кода отключён")
+            return null
+        }
+        val bytes = contentResolver.openInputStream(file.uri)?.use { it.readBytes() } ?: return null
+        if (bytes.take(8192).any { it == 0.toByte() }) {
+            toast("Похоже, это не текстовый файл")
+            return null
+        }
+        return bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF")
+    }
+
+    private fun showText(file: DocumentFile) {
+        val source = try { readText(file) } catch (e: Exception) {
+            toast("Не удалось прочитать файл")
+            null
+        } ?: return
+        showViewer(file.name ?: "Просмотр файла", "Исходный код", source)
+    }
+
+    private fun previewHtml(file: DocumentFile) {
+        val html = try { readText(file) } catch (_: Exception) { null } ?: return
+        showingViewer = true
+        searchBox.visibility = android.view.View.GONE
+        header.text = file.name ?: "HTML"
+        pathLabel.text = "Предпросмотр HTML • JavaScript выключен"
+        listArea.removeAllViews()
+        val web = WebView(this).apply {
+            setBackgroundColor(Color.WHITE)
+            settings.javaScriptEnabled = false
+            settings.domStorageEnabled = false
+            webViewClient = WebViewClient()
+            loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+        }
+        listArea.addView(web, LinearLayout.LayoutParams(-1, -1))
+    }
+
+    private fun showArchive(file: DocumentFile) {
+        showingViewer = true
+        searchBox.visibility = android.view.View.GONE
+        header.text = file.name ?: "Архив"
+        pathLabel.text = if (file.name?.endsWith(".apk", true) == true) "Содержимое APK • просмотр без запуска" else "Содержимое архива"
+        listArea.removeAllViews()
+        val content = try {
+            val input = contentResolver.openInputStream(file.uri) ?: throw Exception()
+            val zip = ZipInputStream(input)
+            val lines = StringBuilder()
+            var count = 0
+            var entry = zip.nextEntry
+            while (entry != null && count < MAX_ARCHIVE_ENTRIES) {
+                lines.append(if (entry.isDirectory) "📁 " else "📄 ")
+                    .append(entry.name)
+                if (!entry.isDirectory && entry.size >= 0) lines.append("   (").append(formatSize(entry.size)).append(")")
+                lines.append('\n')
+                count++
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+            zip.close()
+            if (count == 0) "Архив пуст или имеет неподдерживаемый формат." else lines.toString() +
+                if (count == MAX_ARCHIVE_ENTRIES) "\n…показаны первые $MAX_ARCHIVE_ENTRIES элементов" else ""
+        } catch (_: Exception) {
+            "Не удалось прочитать архив. Возможно, файл повреждён или защищён паролем."
+        }
+        listArea.addView(label(content, textPrimary, 12f).apply {
+            typeface = Typeface.MONOSPACE
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            setTextIsSelectable(true)
+            setBackgroundColor(panel)
+        })
+    }
+
+    private fun showViewer(title: String, subtitle: String, source: String) {
+        showingViewer = true
+        searchBox.visibility = android.view.View.GONE
+        header.text = title
+        pathLabel.text = subtitle
         listArea.removeAllViews()
         val code = TextView(this).apply {
-            text = source
-            textSize = 13f
+            text = highlightCode(source, title)
+            textSize = 12.5f
             typeface = Typeface.MONOSPACE
             setTextColor(0xFFD6DEEB.toInt())
             setBackgroundColor(0xFF101722.toInt())
@@ -237,44 +327,147 @@ class MainActivity : Activity() {
         listArea.addView(code, LinearLayout.LayoutParams(-1, -2))
     }
 
-    private fun goBack() {
-        if (showingCode) {
-            renderFolder()
-            return
+    private fun highlightCode(source: String, fileName: String): SpannableString {
+        val styled = SpannableString(source)
+        val ext = fileName.substringAfterLast('.', "").lowercase()
+        val keywords = when (ext) {
+            "html", "htm" -> listOf("html", "head", "body", "div", "span", "script", "style", "title", "meta", "link", "h1", "p")
+            "py" -> listOf("def", "class", "return", "if", "else", "elif", "for", "while", "import", "from", "as", "True", "False", "None")
+            "kt", "kts", "java" -> listOf("fun", "val", "var", "class", "object", "return", "if", "else", "when", "for", "while", "import", "package", "private", "public", "override")
+            "js", "ts", "css" -> listOf("const", "let", "var", "function", "return", "if", "else", "class", "new", "import", "export")
+            else -> listOf("true", "false", "null", "if", "else", "return", "class", "function")
         }
+        val pattern = Regex("\\b(" + keywords.joinToString("|") { Regex.escape(it) } + ")\\b")
+        pattern.findAll(source).forEach {
+            styled.setSpan(ForegroundColorSpan(0xFF79B8FF.toInt()), it.range.first, it.range.last + 1, 0)
+        }
+        Regex(""([^"\\\\]|\\\\.)*"|'([^'\\\\]|\\\\.)*'").findAll(source).forEach {
+            styled.setSpan(ForegroundColorSpan(0xFFA5D6A7.toInt()), it.range.first, it.range.last + 1, 0)
+        }
+        return styled
+    }
+
+    private fun createFolder() {
+        val input = EditText(this).apply { hint = "Название папки"; setTextColor(textPrimary) }
+        android.app.AlertDialog.Builder(this).setTitle("Новая папка").setView(input)
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Создать") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isNotEmpty() && currentFolder?.findFile(name) == null) {
+                    if (currentFolder?.createDirectory(name) != null) renderFolder() else toast("Не удалось создать папку")
+                } else toast("Укажи другое название")
+            }.show()
+    }
+
+    private fun showFileActions(file: DocumentFile) {
+        val actions = if (file.isDirectory) arrayOf("Переименовать", "Копировать сюда", "Переместить сюда", "Удалить")
+            else arrayOf("Переименовать", "Копировать сюда", "Переместить сюда", "Удалить")
+        android.app.AlertDialog.Builder(this).setTitle(file.name ?: "Файл")
+            .setItems(actions) { _, which ->
+                when (which) {
+                    0 -> renameFile(file)
+                    1 -> { transferFile = file; transferMove = false; renderEntries(); toast("Открой папку назначения и нажми кнопку вставки") }
+                    2 -> { transferFile = file; transferMove = true; renderEntries(); toast("Открой папку назначения и нажми кнопку вставки") }
+                    3 -> confirmDelete(file)
+                }
+            }.show()
+    }
+
+    private fun renameFile(file: DocumentFile) {
+        val input = EditText(this).apply { setText(file.name ?: ""); setTextColor(textPrimary) }
+        android.app.AlertDialog.Builder(this).setTitle("Переименовать").setView(input)
+            .setNegativeButton("Отмена", null).setPositiveButton("Сохранить") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isNotEmpty() && file.renameTo(name)) renderFolder() else toast("Не удалось переименовать")
+            }.show()
+    }
+
+    private fun confirmDelete(file: DocumentFile) {
+        android.app.AlertDialog.Builder(this).setTitle("Удалить?")
+            .setMessage("Удалить «${file.name}»?")
+            .setNegativeButton("Отмена", null).setPositiveButton("Удалить") { _, _ ->
+                if (file.delete()) renderFolder() else toast("Не удалось удалить")
+            }.show()
+    }
+
+    private fun pasteTransfer() {
+        val source = transferFile ?: return
+        val destination = currentFolder ?: return
+        if (source.uri == destination.uri || source.name == null) return toast("Нельзя вставить сюда")
+        val targetName = source.name!!
+        if (destination.findFile(targetName) != null) return toast("Файл с таким именем уже есть")
+        try {
+            val target = if (source.isDirectory) destination.createDirectory(targetName)
+                else destination.createFile(source.type ?: "application/octet-stream", targetName)
+            if (target == null) return toast("Не удалось создать копию")
+            if (source.isDirectory) {
+                source.listFiles().forEach { child -> copyOne(child, target) }
+            } else {
+                contentResolver.openInputStream(source.uri)?.use { input ->
+                    contentResolver.openOutputStream(target.uri)?.use { output -> input.copyTo(output) }
+                } ?: throw Exception("Не удалось прочитать файл")
+            }
+            if (transferMove) source.delete()
+            transferFile = null
+            renderFolder()
+            toast(if (transferMove) "Перемещено" else "Скопировано")
+        } catch (_: Exception) { toast("Не удалось выполнить операцию") }
+    }
+
+    private fun copyOne(source: DocumentFile, destination: DocumentFile) {
+        val name = source.name ?: return
+        if (source.isDirectory) {
+            val folder = destination.createDirectory(name) ?: return
+            source.listFiles().forEach { copyOne(it, folder) }
+        } else {
+            val target = destination.createFile(source.type ?: "application/octet-stream", name) ?: return
+            contentResolver.openInputStream(source.uri)?.use { input ->
+                contentResolver.openOutputStream(target.uri)?.use { output -> input.copyTo(output) }
+            }
+        }
+    }
+
+    private fun openWithExternalApp(file: DocumentFile) {
+        try {
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(file.uri, file.type ?: "*/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(intent)
+        } catch (_: Exception) { toast("Нет приложения для просмотра этого файла") }
+    }
+
+    private fun goBack() {
+        if (showingViewer) { renderFolder(); return }
         if (folderStack.isNotEmpty()) {
             currentFolder = folderStack.removeAt(folderStack.lastIndex)
             renderFolder()
-        } else {
-            toast("Это корневая выбранная папка")
-        }
+        } else toast("Это корневая выбранная папка")
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (showingCode || folderStack.isNotEmpty()) {
-            goBack()
-        } else {
-            super.onBackPressed()
-        }
+        if (showingViewer || folderStack.isNotEmpty()) goBack() else super.onBackPressed()
     }
 
-    private fun formatSize(bytes: Long): String {
-        return when {
-            bytes < 1024 -> "$bytes Б"
-            bytes < 1024 * 1024 -> "${bytes / 1024} КБ"
-            else -> String.format("%.1f МБ", bytes / (1024.0 * 1024.0))
-        }
+    private fun label(value: String, color: Int, size: Float) = TextView(this).apply {
+        text = value
+        setTextColor(color)
+        textSize = size
     }
 
-    private fun toast(message: String) =
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    private fun formatSize(bytes: Long): String = when {
+        bytes < 1024 -> "$bytes Б"
+        bytes < 1024 * 1024 -> "${bytes / 1024} КБ"
+        else -> String.format("%.1f МБ", bytes / (1024.0 * 1024.0))
+    }
 
-    private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt()
+    private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     companion object {
         private const val REQUEST_FOLDER = 410
-        private const val MAX_FILE_SIZE = 2L * 1024L * 1024L
+        private const val MAX_TEXT_SIZE = 5L * 1024L * 1024L
+        private const val MAX_ARCHIVE_ENTRIES = 1500
     }
 }
