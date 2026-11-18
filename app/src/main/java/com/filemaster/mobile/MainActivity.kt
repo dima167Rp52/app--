@@ -340,7 +340,7 @@ class MainActivity : Activity() {
         pattern.findAll(source).forEach {
             styled.setSpan(ForegroundColorSpan(0xFF79B8FF.toInt()), it.range.first, it.range.last + 1, 0)
         }
-        Regex(""([^"\\\\]|\\\\.)*"|'([^'\\\\]|\\\\.)*'").findAll(source).forEach {
+        Regex("""("[^"]*"|'[^']*')""").findAll(source).forEach {
             styled.setSpan(ForegroundColorSpan(0xFFA5D6A7.toInt()), it.range.first, it.range.last + 1, 0)
         }
         return styled
