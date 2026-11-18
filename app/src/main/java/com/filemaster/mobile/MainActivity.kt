@@ -29,7 +29,7 @@ class MainActivity : Activity() {
     private val bg = 0xFF0B111B.toInt()
     private val panel = 0xFF111B29.toInt()
     private val accent = 0xFF263F5B.toInt()
-    private val foreground = 0xFFE3ECF7.toInt()
+    private val textPrimary = 0xFFE3ECF7.toInt()
     private val muted = 0xFF91A6BE.toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -63,7 +63,7 @@ class MainActivity : Activity() {
         header = TextView(this).apply {
             text = "FileMaster"
             textSize = 27f
-            setTextColor(foreground)
+            setTextColor(textPrimary)
             typeface = Typeface.DEFAULT_BOLD
         }
         rootLayout.addView(header)
@@ -103,7 +103,7 @@ class MainActivity : Activity() {
             text = label
             isAllCaps = false
             textSize = 14f
-            setTextColor(foreground)
+            setTextColor(textPrimary)
             setBackgroundColor(accent)
             setOnClickListener { action() }
         }
@@ -176,7 +176,7 @@ class MainActivity : Activity() {
             val name = TextView(this).apply {
                 text = (if (file.isDirectory) "📁  " else "📄  ") + (file.name ?: "Без имени")
                 textSize = 16f
-                setTextColor(foreground)
+                setTextColor(textPrimary)
             }
             row.addView(name)
             val details = TextView(this).apply {
