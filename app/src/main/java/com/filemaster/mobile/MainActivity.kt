@@ -85,10 +85,17 @@ class MainActivity : Activity() {
         rootLayout.addView(pathLabel)
 
         val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        top.addView(makeButton("Папка") { chooseFolder() }, weighted())
-        top.addView(makeButton("＋ Создать") { createFolder() }, weighted(dp(6)))
-        top.addView(makeButton("Назад") { goBack() }, weighted(dp(6)))
+        top.addView(makeButton("📁 Папка") { chooseFolder() }, weighted())
+        top.addView(makeButton("📄 Открыть файл") { chooseFile() }, weighted(dp(6)))
         rootLayout.addView(top)
+
+        val secondTop = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val secondParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) }
+        secondTop.addView(makeButton("＋ Создать папку") { createFolder() }, weighted())
+        secondTop.addView(makeButton("Назад") { goBack() }, weighted(dp(6)))
+        rootLayout.addView(secondTop, secondParams)
 
         searchBox = EditText(this).apply {
             hint = "Поиск в этой папке…"
@@ -131,6 +138,18 @@ class MainActivity : Activity() {
             setOnClickListener { action() }
         }
 
+    // Открывает системный выбор одного файла. Это работает даже для файлов
+    // в Download, корневую папку которой Android может запрещать выбирать целиком.
+    private fun chooseFile() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        startActivityForResult(intent, REQUEST_FILE)
+    }
+
     private fun chooseFolder() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -143,8 +162,22 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Android, kept for compatibility")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_FOLDER && resultCode == RESULT_OK) {
-            val uri = data?.data ?: return
+        if (resultCode != RESULT_OK || data?.data == null) return
+
+        val uri = data.data!!
+        if (requestCode == REQUEST_FILE) {
+            val flags = data.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            try { contentResolver.takePersistableUriPermission(uri, flags) } catch (_: Exception) {}
+            val pickedFile = DocumentFile.fromSingleUri(this, uri)
+            if (pickedFile == null) {
+                toast("Не удалось открыть выбранный файл")
+            } else {
+                openFile(pickedFile)
+            }
+            return
+        }
+
+        if (requestCode == REQUEST_FOLDER) {
             val flags = data.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
             try { contentResolver.takePersistableUriPermission(uri, flags) } catch (_: Exception) {}
             getPreferences(MODE_PRIVATE).edit().putString("tree_uri", uri.toString()).apply()
@@ -466,6 +499,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_FOLDER = 410
+        private const val REQUEST_FILE = 411
         private const val MAX_TEXT_SIZE = 5L * 1024L * 1024L
         private const val MAX_ARCHIVE_ENTRIES = 1500
     }
