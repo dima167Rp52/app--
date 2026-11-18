@@ -6,6 +6,9 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
+import android.os.Build
+import android.os.Environment
+import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
 import android.text.SpannableString
@@ -20,6 +23,9 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.documentfile.provider.DocumentFile
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.zip.ZipInputStream
@@ -49,6 +55,10 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildScreen()
+        if (hasAllFilesAccess()) {
+            openSharedStorage()
+            return
+        }
         val saved = getPreferences(MODE_PRIVATE).getString("tree_uri", null)
         if (saved != null) {
             try {
@@ -97,6 +107,9 @@ class MainActivity : Activity() {
         secondTop.addView(makeButton("Назад") { goBack() }, weighted(dp(6)))
         rootLayout.addView(secondTop, secondParams)
 
+        val accessParams = LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(6) }
+        rootLayout.addView(makeButton("🔓 Разрешить доступ ко всем файлам") { requestAllFilesAccess() }, accessParams)
+
         searchBox = EditText(this).apply {
             hint = "Поиск в этой папке…"
             setHintTextColor(muted)
@@ -137,6 +150,49 @@ class MainActivity : Activity() {
             setBackgroundColor(accent)
             setOnClickListener { action() }
         }
+
+    private fun hasAllFilesAccess(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.R || Environment.isExternalStorageManager()
+
+    private fun requestAllFilesAccess() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || hasAllFilesAccess()) {
+            openSharedStorage()
+            return
+        }
+        try {
+            val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                data = Uri.parse("package:$packageName")
+            }
+            startActivity(intent)
+        } catch (_: Exception) {
+            startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::listArea.isInitialized && hasAllFilesAccess() && rootFolder == null) {
+            openSharedStorage()
+        }
+    }
+
+    private fun openSharedStorage() {
+        val folder = DocumentFile.fromFile(Environment.getExternalStorageDirectory())
+        rootFolder = folder
+        currentFolder = folder
+        folderStack.clear()
+        transferFile = null
+        renderFolder()
+        toast("Открыто общее хранилище устройства")
+    }
+
+    private fun openInput(file: DocumentFile) =
+        if (file.uri.scheme == "file") FileInputStream(File(file.uri.path!!))
+        else contentResolver.openInputStream(file.uri)!!
+
+    private fun openOutput(file: DocumentFile) =
+        if (file.uri.scheme == "file") FileOutputStream(File(file.uri.path!!))
+        else contentResolver.openOutputStream(file.uri)!!
 
     // Открывает системный выбор одного файла. Это работает даже для файлов
     // в Download, корневую папку которой Android может запрещать выбирать целиком.
@@ -273,7 +329,7 @@ class MainActivity : Activity() {
             toast("Файл больше 5 МБ — просмотр кода отключён")
             return null
         }
-        val bytes = contentResolver.openInputStream(file.uri)?.use { it.readBytes() } ?: return null
+        val bytes = openInput(file).use { it.readBytes() } ?: return null
         if (bytes.take(8192).any { it == 0.toByte() }) {
             toast("Похоже, это не текстовый файл")
             return null
@@ -313,7 +369,7 @@ class MainActivity : Activity() {
         pathLabel.text = if (file.name?.endsWith(".apk", true) == true) "Содержимое APK • просмотр без запуска" else "Содержимое архива"
         listArea.removeAllViews()
         val content = try {
-            val input = contentResolver.openInputStream(file.uri) ?: throw Exception()
+            val input = openInput(file)
             val zip = ZipInputStream(input)
             val lines = StringBuilder()
             var count = 0
@@ -435,9 +491,7 @@ class MainActivity : Activity() {
             if (source.isDirectory) {
                 source.listFiles().forEach { child -> copyOne(child, target) }
             } else {
-                contentResolver.openInputStream(source.uri)?.use { input ->
-                    contentResolver.openOutputStream(target.uri)?.use { output -> input.copyTo(output) }
-                } ?: throw Exception("Не удалось прочитать файл")
+                openInput(source).use { input -> openOutput(target).use { output -> input.copyTo(output) } }
             }
             if (transferMove) source.delete()
             transferFile = null
@@ -453,9 +507,7 @@ class MainActivity : Activity() {
             source.listFiles().forEach { copyOne(it, folder) }
         } else {
             val target = destination.createFile(source.type ?: "application/octet-stream", name) ?: return
-            contentResolver.openInputStream(source.uri)?.use { input ->
-                contentResolver.openOutputStream(target.uri)?.use { output -> input.copyTo(output) }
-            }
+            openInput(source).use { input -> openOutput(target).use { output -> input.copyTo(output) } }
         }
     }
 
