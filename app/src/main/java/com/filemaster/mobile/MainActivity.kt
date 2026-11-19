@@ -33,6 +33,8 @@ import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.zip.ZipInputStream
 
 class MainActivity : Activity() {
@@ -313,15 +315,165 @@ class MainActivity : Activity() {
 
     private fun openFile(file: DocumentFile) {
         val ext = file.name?.substringAfterLast('.', "")?.lowercase().orEmpty()
-        val zipFile = try {
-            openInput(file).use { input -> isZipSignature(readLimited(input, 4)) }
-        } catch (_: Exception) { false }
+        val prefix = try { openInput(file).use { readLimited(it, 8) } } catch (_: Exception) { ByteArray(0) }
+        val zipFile = isZipSignature(prefix)
+        val binaryXml = isBinaryXmlSignature(prefix)
         when {
             zipFile || ext in ARCHIVE_EXTENSIONS -> showArchive(file)
+            binaryXml || ext == "xml" -> showXmlFile(file, binaryXml)
             ext == "html" || ext == "htm" -> showHtmlChoice(file)
             ext in IMAGE_EXTENSIONS -> openWithExternalApp(file)
             else -> showText(file)
         }
+    }
+
+    private fun isBinaryXmlSignature(bytes: ByteArray): Boolean =
+        bytes.size >= 8 && bytes[0] == 0x03.toByte() && bytes[1] == 0x00.toByte() &&
+            bytes[2] == 0x08.toByte() && bytes[3] == 0x00.toByte()
+
+    private fun showXmlFile(file: DocumentFile, forceBinary: Boolean) {
+        try {
+            val bytes = openInput(file).use { readLimited(it, MAX_XML_BYTES) }
+            val decoded = if (forceBinary || isBinaryXmlSignature(bytes)) decodeBinaryXml(bytes) else {
+                bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF")
+            }
+            showViewer(file.name ?: "XML", if (forceBinary || isBinaryXmlSignature(bytes))
+                "Android Binary XML • декодировано" else "XML-документ", decoded)
+        } catch (e: Exception) {
+            toast("Не удалось декодировать XML: ${e.message ?: "ошибка формата"}")
+            showHex(file)
+        }
+    }
+
+    private fun decodeBinaryXml(bytes: ByteArray): String {
+        val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        fun u16(pos: Int): Int { require(pos >= 0 && pos + 2 <= bytes.size); return b.getShort(pos).toInt() and 0xFFFF }
+        fun i32(pos: Int): Int { require(pos >= 0 && pos + 4 <= bytes.size); return b.getInt(pos) }
+        fun str(pool: List<String>, index: Int): String = if (index < 0 || index >= pool.size) "" else pool[index]
+        fun esc(v: String): String = v.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace("\"", "&quot;").replace("'", "&apos;")
+        fun len8(pos0: Int): Pair<Int, Int> {
+            var p = pos0
+            val first = bytes[p++].toInt() and 255
+            return if (first and 0x80 != 0) {
+                val second = bytes[p++].toInt() and 255
+                Pair(((first and 0x7F) shl 8) or second, p)
+            } else Pair(first, p)
+        }
+        fun len16(pos0: Int): Pair<Int, Int> {
+            val first = u16(pos0)
+            return if (first and 0x8000 != 0) Pair(((first and 0x7FFF) shl 16) or u16(pos0 + 2), pos0 + 4)
+            else Pair(first, pos0 + 2)
+        }
+        fun parsePool(offset: Int, size: Int): List<String> {
+            val count = i32(offset + 8)
+            val flags = i32(offset + 16)
+            val stringsStart = i32(offset + 20)
+            require(count in 0..100000 && stringsStart >= 0 && offset + size <= bytes.size)
+            val utf8 = flags and 0x100 != 0
+            val result = ArrayList<String>(count)
+            for (i in 0 until count) {
+                val relative = i32(offset + 28 + i * 4)
+                var p = offset + stringsStart + relative
+                if (utf8) {
+                    p = len8(p).second
+                    val byteLen = len8(p); val n = byteLen.first; p = byteLen.second
+                    require(n >= 0 && p + n <= bytes.size)
+                    result.add(String(bytes, p, n, Charsets.UTF_8))
+                } else {
+                    val l = len16(p); val n = l.first; p = l.second
+                    require(n >= 0 && p + n * 2 <= bytes.size)
+                    val chars = CharArray(n) { j -> u16(p + j * 2).toChar() }
+                    result.add(String(chars))
+                }
+            }
+            return result
+        }
+        require(bytes.size >= 8 && u16(0) == 3 && u16(2) == 8)
+        val totalSize = i32(4).coerceAtMost(bytes.size)
+        require(totalSize >= 8)
+        var p = 8
+        var strings = emptyList<String>()
+        val out = StringBuilder()
+        val stack = ArrayList<String>()
+        val namespaces = LinkedHashMap<String, String>()
+        val pendingNamespaces = ArrayList<Pair<String, String>>()
+        var rootSeen = false
+        while (p + 8 <= totalSize) {
+            val type = u16(p)
+            val headerSize = u16(p + 2)
+            val chunkSize = i32(p + 4)
+            require(headerSize >= 8 && chunkSize >= headerSize && p + chunkSize <= totalSize)
+            when (type) {
+                0x0001 -> strings = parsePool(p, chunkSize)
+                0x0100 -> {
+                    val prefix = str(strings, i32(p + 16))
+                    val uri = str(strings, i32(p + 20))
+                    namespaces[prefix] = uri
+                    pendingNamespaces.add(Pair(prefix, uri))
+                }
+                0x0102 -> {
+                    val ext = p + 16
+                    val ns = i32(ext)
+                    val name = str(strings, i32(ext + 4))
+                    val attrStart = u16(ext + 8)
+                    val attrSize = u16(ext + 10)
+                    val attrCount = u16(ext + 12)
+                    require(attrSize >= 20 && attrCount <= 10000)
+                    val prefix = namespaces.entries.firstOrNull { it.value == str(strings, ns) }?.key.orEmpty()
+                    val tag = if (prefix.isNotEmpty()) "$prefix:$name" else name
+                    if (stack.isNotEmpty()) out.append("  ".repeat(stack.size))
+                    out.append("<").append(tag)
+                    if (!rootSeen) {
+                        pendingNamespaces.forEach { (pr, uri) ->
+                            out.append(if (pr.isEmpty()) " xmlns=\"" else " xmlns:$pr=\"")
+                                .append(esc(uri)).append("\"")
+                        }
+                        rootSeen = true
+                    }
+                    val attrsBase = ext + attrStart
+                    for (i in 0 until attrCount) {
+                        val a = attrsBase + i * attrSize
+                        val ans = str(strings, i32(a))
+                        val aname = str(strings, i32(a + 4))
+                        val raw = i32(a + 8)
+                        val dataType = bytes[a + 15].toInt() and 255
+                        val data = i32(a + 16)
+                        val ap = namespaces.entries.firstOrNull { it.value == ans && ans.isNotEmpty() }?.key.orEmpty()
+                        val fullName = if (ap.isNotEmpty()) "$ap:$aname" else aname
+                        val value = if (raw != -1) str(strings, raw) else when (dataType) {
+                            0x03 -> str(strings, data)
+                            0x12 -> if (data != 0) "true" else "false"
+                            0x10 -> data.toString()
+                            0x11 -> "0x" + data.toUInt().toString(16)
+                            0x04 -> java.lang.Float.intBitsToFloat(data).toString()
+                            else -> "@0x" + data.toUInt().toString(16)
+                        }
+                        out.append(" ").append(fullName).append("=\"").append(esc(value)).append("\"")
+                    }
+                    if (attrCount == 0) Unit
+                    out.append(">")
+                    if (stack.isNotEmpty() || attrCount == 0) out.append("\n")
+                    stack.add(tag)
+                }
+                0x0103 -> {
+                    if (stack.isNotEmpty()) {
+                        val tag = stack.removeAt(stack.lastIndex)
+                        if (stack.isNotEmpty()) out.append("  ".repeat(stack.size))
+                        out.append("</").append(tag).append(">\n")
+                    }
+                }
+                0x0104 -> {
+                    val dataIndex = i32(p + 16)
+                    val text = str(strings, dataIndex)
+                    if (text.isNotEmpty()) out.append("  ".repeat(stack.size)).append(esc(text)).append("\n")
+                }
+            }
+            p += chunkSize
+        }
+        require(strings.isNotEmpty()) { "В файле не найдена таблица строк" }
+        require(out.isNotEmpty()) { "В файле нет XML-элементов" }
+        return out.toString().trim()
     }
 
     private fun isZipSignature(bytes: ByteArray): Boolean =
@@ -735,6 +887,7 @@ class MainActivity : Activity() {
         private const val REQUEST_FOLDER = 410
         private const val REQUEST_FILE = 411
         private const val MAX_PREVIEW_CHARS = 1_500_000
+        private const val MAX_XML_BYTES = 16 * 1024 * 1024
         private const val MAX_HEX_BYTES = 64 * 1024
         private const val MAX_ARCHIVE_PREVIEW_BYTES = 2 * 1024 * 1024
         private const val MAX_NESTED_ARCHIVE_BYTES = 32 * 1024 * 1024
