@@ -29,6 +29,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.ByteArrayOutputStream
+import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -312,13 +313,22 @@ class MainActivity : Activity() {
 
     private fun openFile(file: DocumentFile) {
         val ext = file.name?.substringAfterLast('.', "")?.lowercase().orEmpty()
-        when (ext) {
-            "html", "htm" -> showHtmlChoice(file)
-            "zip", "apk", "jar" -> showArchive(file)
-            "png", "jpg", "jpeg", "webp", "gif" -> openWithExternalApp(file)
+        val zipFile = try {
+            openInput(file).use { input -> isZipSignature(readLimited(input, 4)) }
+        } catch (_: Exception) { false }
+        when {
+            zipFile || ext in ARCHIVE_EXTENSIONS -> showArchive(file)
+            ext == "html" || ext == "htm" -> showHtmlChoice(file)
+            ext in IMAGE_EXTENSIONS -> openWithExternalApp(file)
             else -> showText(file)
         }
     }
+
+    private fun isZipSignature(bytes: ByteArray): Boolean =
+        bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte() &&
+            ((bytes[2] == 0x03.toByte() && bytes[3] == 0x04.toByte()) ||
+             (bytes[2] == 0x05.toByte() && bytes[3] == 0x06.toByte()) ||
+             (bytes[2] == 0x07.toByte() && bytes[3] == 0x08.toByte()))
 
     private fun showHtmlChoice(file: DocumentFile) {
         android.app.AlertDialog.Builder(this)
@@ -426,29 +436,13 @@ class MainActivity : Activity() {
                 var entry = zip.nextEntry
                 while (entry != null) {
                     if (entry.name == entryName) {
-                        val bytes = readLimited(zip, MAX_ARCHIVE_PREVIEW_BYTES)
-                        val ext = entryName.substringAfterLast('.', "").lowercase()
-                        if (ext in IMAGE_EXTENSIONS) {
-                            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                            if (bitmap != null) {
-                                showingViewer = true
-                                header.text = entryName.substringAfterLast('/')
-                                pathLabel.text = "Изображение внутри архива"
-                                listArea.removeAllViews()
-                                val image = ImageView(this).apply {
-                                    setImageBitmap(bitmap)
-                                    adjustViewBounds = true
-                                    scaleType = ImageView.ScaleType.FIT_CENTER
-                                }
-                                listArea.addView(image, LinearLayout.LayoutParams(-1, -1))
-                            } else showArchiveHex(entryName, bytes)
-                        } else if (ext in BINARY_EXTENSIONS || bytes.take(8192).any { it == 0.toByte() }) {
-                            showArchiveHex(entryName, bytes)
+                        val prefix = readLimited(zip, 4)
+                        val bytes = if (isZipSignature(prefix)) {
+                            prefix + readLimited(zip, MAX_NESTED_ARCHIVE_BYTES - prefix.size)
                         } else {
-                            val source = bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF") +
-                                if (bytes.size >= MAX_ARCHIVE_PREVIEW_BYTES) "\n\n…Показана начальная часть файла." else ""
-                            showViewer(entryName.substringAfterLast('/'), "Файл внутри архива", source)
+                            prefix + readLimited(zip, MAX_ARCHIVE_PREVIEW_BYTES - prefix.size)
                         }
+                        displayArchiveEntry(entryName, bytes)
                         return
                     }
                     zip.closeEntry()
@@ -458,6 +452,95 @@ class MainActivity : Activity() {
             toast("Файл внутри архива не найден")
         } catch (_: Exception) {
             toast("Не удалось открыть файл из архива")
+        }
+    }
+
+    private fun displayArchiveEntry(entryName: String, bytes: ByteArray) {
+        val ext = entryName.substringAfterLast('.', "").lowercase()
+        if (isZipSignature(bytes)) {
+            showArchiveBytes(entryName.substringAfterLast('/'), bytes)
+        } else if (ext in IMAGE_EXTENSIONS) {
+            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            if (bitmap != null) {
+                showingViewer = true
+                searchBox.visibility = android.view.View.GONE
+                header.text = entryName.substringAfterLast('/')
+                pathLabel.text = "Изображение внутри архива"
+                listArea.removeAllViews()
+                val image = ImageView(this).apply {
+                    setImageBitmap(bitmap)
+                    adjustViewBounds = true
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                }
+                listArea.addView(image, LinearLayout.LayoutParams(-1, -1))
+            } else showArchiveHex(entryName, bytes)
+        } else if (ext in BINARY_EXTENSIONS || bytes.take(minOf(8192, bytes.size)).any { it == 0.toByte() }) {
+            showArchiveHex(entryName, bytes)
+        } else {
+            val source = bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF") +
+                if (bytes.size >= MAX_ARCHIVE_PREVIEW_BYTES) "\n\n…Показана начальная часть файла." else ""
+            showViewer(entryName.substringAfterLast('/'), "Файл внутри архива", source)
+        }
+    }
+
+    private fun showArchiveBytes(title: String, bytes: ByteArray) {
+        showingViewer = true
+        searchBox.visibility = android.view.View.GONE
+        header.text = title
+        pathLabel.text = "Вложенный архив • нажми на файл для просмотра"
+        listArea.removeAllViews()
+        try {
+            val names = mutableListOf<String>()
+            ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+                var entry = zip.nextEntry
+                while (entry != null && names.size < MAX_ARCHIVE_ENTRIES) {
+                    names.add(entry.name)
+                    zip.closeEntry()
+                    entry = zip.nextEntry
+                }
+            }
+            if (names.isEmpty()) {
+                listArea.addView(label("Архив пуст или не удалось прочитать его содержимое", muted, 14f))
+                return
+            }
+            names.forEach { name ->
+                val row = label((if (name.endsWith("/")) "📁  " else "📄  ") + name, textPrimary, 12f).apply {
+                    typeface = Typeface.MONOSPACE
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                    setBackgroundColor(panel)
+                    setOnClickListener { openArchiveBytesEntry(bytes, name) }
+                }
+                val params = LinearLayout.LayoutParams(-1, -2)
+                params.bottomMargin = dp(5)
+                listArea.addView(row, params)
+            }
+        } catch (_: Exception) {
+            listArea.addView(label("Не удалось прочитать вложенный архив", muted, 14f))
+        }
+    }
+
+    private fun openArchiveBytesEntry(archiveBytes: ByteArray, entryName: String) {
+        if (entryName.endsWith("/")) return
+        try {
+            ZipInputStream(ByteArrayInputStream(archiveBytes)).use { zip ->
+                var entry = zip.nextEntry
+                while (entry != null) {
+                    if (entry.name == entryName) {
+                        val prefix = readLimited(zip, 4)
+                        val bytes = if (isZipSignature(prefix)) {
+                            prefix + readLimited(zip, MAX_NESTED_ARCHIVE_BYTES - prefix.size)
+                        } else {
+                            prefix + readLimited(zip, MAX_ARCHIVE_PREVIEW_BYTES - prefix.size)
+                        }
+                        displayArchiveEntry(entryName, bytes)
+                        return
+                    }
+                    zip.closeEntry()
+                    entry = zip.nextEntry
+                }
+            }
+        } catch (_: Exception) {
+            toast("Не удалось открыть файл из вложенного архива")
         }
     }
 
@@ -654,7 +737,9 @@ class MainActivity : Activity() {
         private const val MAX_PREVIEW_CHARS = 1_500_000
         private const val MAX_HEX_BYTES = 64 * 1024
         private const val MAX_ARCHIVE_PREVIEW_BYTES = 2 * 1024 * 1024
+        private const val MAX_NESTED_ARCHIVE_BYTES = 32 * 1024 * 1024
         private const val MAX_ARCHIVE_ENTRIES = 1500
+        private val ARCHIVE_EXTENSIONS = setOf("zip", "apk", "jar", "mcpack", "mcaddon")
         private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
         private val BINARY_EXTENSIONS = setOf("dex", "so", "prof", "profm", "class", "jar")
     }
