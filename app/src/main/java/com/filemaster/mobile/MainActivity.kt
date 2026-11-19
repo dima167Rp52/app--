@@ -3,6 +3,7 @@ package com.filemaster.mobile
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
@@ -19,6 +20,7 @@ import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ImageView
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -26,6 +28,8 @@ import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.zip.ZipInputStream
@@ -324,25 +328,39 @@ class MainActivity : Activity() {
             }.show()
     }
 
+    // Потоковое чтение: не загружаем весь большой файл в память.
     private fun readText(file: DocumentFile): String? {
-        if (file.length() > MAX_TEXT_SIZE) {
-            toast("Файл больше 5 МБ — просмотр кода отключён")
-            return null
+        val sample = ByteArray(8192)
+        val n = openInput(file).use { it.read(sample) }
+        if (n > 0 && (0 until n).any { sample[it] == 0.toByte() }) return null
+        val result = StringBuilder()
+        var truncated = false
+        InputStreamReader(openInput(file), Charsets.UTF_8).use { reader ->
+            val buffer = CharArray(8192)
+            while (result.length < MAX_PREVIEW_CHARS) {
+                val count = reader.read(buffer, 0, minOf(buffer.size, MAX_PREVIEW_CHARS - result.length))
+                if (count < 0) break
+                result.append(buffer, 0, count)
+                if (result.length >= MAX_PREVIEW_CHARS) {
+                    truncated = reader.read() != -1
+                    break
+                }
+            }
         }
-        val bytes = openInput(file).use { it.readBytes() } ?: return null
-        if (bytes.take(8192).any { it == 0.toByte() }) {
-            toast("Похоже, это не текстовый файл")
-            return null
-        }
-        return bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF")
+        return result.toString().removePrefix("\uFEFF") +
+            if (truncated) "\n\n…Показана начальная часть большого файла." else ""
     }
 
     private fun showText(file: DocumentFile) {
-        val source = try { readText(file) } catch (e: Exception) {
+        val source = try { readText(file) } catch (_: Exception) {
             toast("Не удалось прочитать файл")
             null
-        } ?: return
-        showViewer(file.name ?: "Просмотр файла", "Исходный код", source)
+        }
+        if (source == null) {
+            showHex(file)
+            return
+        }
+        showViewer(file.name ?: "Просмотр файла", "Текстовый просмотр • потоковое чтение", source)
     }
 
     private fun previewHtml(file: DocumentFile) {
@@ -366,37 +384,118 @@ class MainActivity : Activity() {
         showingViewer = true
         searchBox.visibility = android.view.View.GONE
         header.text = file.name ?: "Архив"
-        pathLabel.text = if (file.name?.endsWith(".apk", true) == true) "Содержимое APK • просмотр без запуска" else "Содержимое архива"
+        pathLabel.text = "Содержимое архива • нажми на файл для просмотра"
         listArea.removeAllViews()
-        val content = try {
-            val input = openInput(file)
-            val zip = ZipInputStream(input)
-            val lines = StringBuilder()
-            var count = 0
-            var entry = zip.nextEntry
-            while (entry != null && count < MAX_ARCHIVE_ENTRIES) {
-                lines.append(if (entry.isDirectory) "📁 " else "📄 ")
-                    .append(entry.name)
-                if (!entry.isDirectory && entry.size >= 0) lines.append("   (").append(formatSize(entry.size)).append(")")
-                lines.append('\n')
-                count++
-                zip.closeEntry()
-                entry = zip.nextEntry
+        try {
+            val entries = mutableListOf<String>()
+            ZipInputStream(openInput(file)).use { zip ->
+                var entry = zip.nextEntry
+                while (entry != null && entries.size < MAX_ARCHIVE_ENTRIES) {
+                    entries.add(entry.name)
+                    zip.closeEntry()
+                    entry = zip.nextEntry
+                }
             }
-            zip.close()
-            if (count == 0) "Архив пуст или имеет неподдерживаемый формат." else lines.toString() +
-                if (count == MAX_ARCHIVE_ENTRIES) "\n…показаны первые $MAX_ARCHIVE_ENTRIES элементов" else ""
+            if (entries.isEmpty()) {
+                listArea.addView(label("Архив пуст или формат не поддерживается", muted, 14f))
+                return
+            }
+            entries.forEach { entryName ->
+                val row = label((if (entryName.endsWith("/")) "📁  " else "📄  ") + entryName, textPrimary, 12f).apply {
+                    typeface = Typeface.MONOSPACE
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                    setBackgroundColor(panel)
+                    setOnClickListener { openArchiveEntry(file, entryName) }
+                }
+                val params = LinearLayout.LayoutParams(-1, -2)
+                params.bottomMargin = dp(5)
+                listArea.addView(row, params)
+            }
+            if (entries.size == MAX_ARCHIVE_ENTRIES) {
+                listArea.addView(label("Показаны первые " + MAX_ARCHIVE_ENTRIES + " элементов", muted, 11f))
+            }
         } catch (_: Exception) {
-            "Не удалось прочитать архив. Возможно, файл повреждён или защищён паролем."
+            listArea.addView(label("Не удалось прочитать архив. Возможно, он повреждён или защищён паролем.", muted, 14f))
         }
-        listArea.addView(label(content, textPrimary, 12f).apply {
-            typeface = Typeface.MONOSPACE
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            setTextIsSelectable(true)
-            setBackgroundColor(panel)
-        })
     }
 
+    private fun openArchiveEntry(archive: DocumentFile, entryName: String) {
+        if (entryName.endsWith("/")) return
+        try {
+            ZipInputStream(openInput(archive)).use { zip ->
+                var entry = zip.nextEntry
+                while (entry != null) {
+                    if (entry.name == entryName) {
+                        val bytes = readLimited(zip, MAX_ARCHIVE_PREVIEW_BYTES)
+                        val ext = entryName.substringAfterLast('.', "").lowercase()
+                        if (ext in IMAGE_EXTENSIONS) {
+                            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            if (bitmap != null) {
+                                showingViewer = true
+                                header.text = entryName.substringAfterLast('/')
+                                pathLabel.text = "Изображение внутри архива"
+                                listArea.removeAllViews()
+                                val image = ImageView(this).apply {
+                                    setImageBitmap(bitmap)
+                                    adjustViewBounds = true
+                                    scaleType = ImageView.ScaleType.FIT_CENTER
+                                }
+                                listArea.addView(image, LinearLayout.LayoutParams(-1, -1))
+                            } else showArchiveHex(entryName, bytes)
+                        } else if (ext in BINARY_EXTENSIONS || bytes.take(8192).any { it == 0.toByte() }) {
+                            showArchiveHex(entryName, bytes)
+                        } else {
+                            val source = bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF") +
+                                if (bytes.size >= MAX_ARCHIVE_PREVIEW_BYTES) "\n\n…Показана начальная часть файла." else ""
+                            showViewer(entryName.substringAfterLast('/'), "Файл внутри архива", source)
+                        }
+                        return
+                    }
+                    zip.closeEntry()
+                    entry = zip.nextEntry
+                }
+            }
+            toast("Файл внутри архива не найден")
+        } catch (_: Exception) {
+            toast("Не удалось открыть файл из архива")
+        }
+    }
+
+    private fun showArchiveHex(name: String, bytes: ByteArray) {
+        val lines = StringBuilder()
+        for (start in bytes.indices step 16) {
+            val end = minOf(start + 16, bytes.size)
+            lines.append("%08X  ".format(start))
+            for (i in start until end) lines.append("%02X ".format(bytes[i].toInt() and 0xFF))
+            lines.append("  ")
+            for (i in start until end) {
+                val c = bytes[i].toInt() and 0xFF
+                lines.append(if (c in 32..126) c.toChar() else '.')
+            }
+            lines.append('\n')
+        }
+        showViewer(name.substringAfterLast('/'), "Бинарный файл • HEX", lines.toString())
+    }
+
+    private fun showHex(file: DocumentFile) {
+        try {
+            val bytes = openInput(file).use { readLimited(it, MAX_HEX_BYTES) }
+            showArchiveHex(file.name ?: "Бинарный файл", bytes)
+        } catch (_: Exception) { toast("Не удалось прочитать файл") }
+    }
+
+    private fun readLimited(input: InputStream, limit: Int): ByteArray {
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        var total = 0
+        while (total < limit) {
+            val count = input.read(buffer, 0, minOf(buffer.size, limit - total))
+            if (count < 0) break
+            output.write(buffer, 0, count)
+            total += count
+        }
+        return output.toByteArray()
+    }
     private fun showViewer(title: String, subtitle: String, source: String) {
         showingViewer = true
         searchBox.visibility = android.view.View.GONE
@@ -552,7 +651,11 @@ class MainActivity : Activity() {
     companion object {
         private const val REQUEST_FOLDER = 410
         private const val REQUEST_FILE = 411
-        private const val MAX_TEXT_SIZE = 5L * 1024L * 1024L
+        private const val MAX_PREVIEW_CHARS = 1_500_000
+        private const val MAX_HEX_BYTES = 64 * 1024
+        private const val MAX_ARCHIVE_PREVIEW_BYTES = 2 * 1024 * 1024
         private const val MAX_ARCHIVE_ENTRIES = 1500
+        private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "gif", "bmp")
+        private val BINARY_EXTENSIONS = setOf("dex", "so", "prof", "profm", "class", "jar")
     }
 }
