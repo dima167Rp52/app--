@@ -49,6 +49,8 @@ class MainActivity : Activity() {
     private var currentFolder: DocumentFile? = null
     private val folderStack = mutableListOf<DocumentFile>()
     private var showingViewer = false
+    private val archiveBackStack = mutableListOf<() -> Unit>()
+    private var currentArchiveTitle = ""
     private var transferFile: DocumentFile? = null
     private var transferMove = false
     private var allEntries: List<DocumentFile> = emptyList()
@@ -314,6 +316,7 @@ class MainActivity : Activity() {
     }
 
     private fun openFile(file: DocumentFile) {
+        archiveBackStack.clear()
         val ext = file.name?.substringAfterLast('.', "")?.lowercase().orEmpty()
         val prefix = try { openInput(file).use { readLimited(it, 8) } } catch (_: Exception) { ByteArray(0) }
         val zipFile = isZipSignature(prefix)
@@ -542,7 +545,8 @@ class MainActivity : Activity() {
         listArea.addView(web, LinearLayout.LayoutParams(-1, -1))
     }
 
-    private fun showArchive(file: DocumentFile) {
+    private fun showArchive(file: DocumentFile, clearBackStack: Boolean = true) {
+        if (clearBackStack) archiveBackStack.clear()
         showingViewer = true
         searchBox.visibility = android.view.View.GONE
         header.text = file.name ?: "Архив"
@@ -594,6 +598,7 @@ class MainActivity : Activity() {
                         } else {
                             prefix + readLimited(zip, MAX_ARCHIVE_PREVIEW_BYTES - prefix.size)
                         }
+                        archiveBackStack.add { showArchive(archive, false) }
                         displayArchiveEntry(entryName, bytes)
                         return
                     }
@@ -636,6 +641,7 @@ class MainActivity : Activity() {
     }
 
     private fun showArchiveBytes(title: String, bytes: ByteArray) {
+        currentArchiveTitle = title
         showingViewer = true
         searchBox.visibility = android.view.View.GONE
         header.text = title
@@ -684,6 +690,8 @@ class MainActivity : Activity() {
                         } else {
                             prefix + readLimited(zip, MAX_ARCHIVE_PREVIEW_BYTES - prefix.size)
                         }
+                        val parentTitle = currentArchiveTitle
+                        archiveBackStack.add { showArchiveBytes(parentTitle, archiveBytes) }
                         displayArchiveEntry(entryName, bytes)
                         return
                     }
@@ -856,7 +864,14 @@ class MainActivity : Activity() {
     }
 
     private fun goBack() {
-        if (showingViewer) { renderFolder(); return }
+        if (showingViewer) {
+            if (archiveBackStack.isNotEmpty()) {
+                archiveBackStack.removeAt(archiveBackStack.lastIndex).invoke()
+            } else {
+                renderFolder()
+            }
+            return
+        }
         if (folderStack.isNotEmpty()) {
             currentFolder = folderStack.removeAt(folderStack.lastIndex)
             renderFolder()
